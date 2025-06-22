@@ -1,4 +1,4 @@
-# NavBot
+# BotFusion
 
 A modular robotics platform based on Arduino and Raspberry Pi.
 
