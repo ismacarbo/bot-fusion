@@ -34,6 +34,11 @@ class Lidar:
         #closes the serial
         if self._serial and self._serial.is_open:
             self._serial.close()
+
+    def sendCmd(self,cmd):
+        #sends a command without payload
+        packet=bytes([self.SYNC_A,cmd])
+        self._serial.write(packet)
     
     def readDescriptor(self):
         #reads and checks the descriptor of response
@@ -45,3 +50,39 @@ class Lidar:
             raise LidarError("Received Descriptor malformed")
         size=desc[2]
         return size
+    
+    def readResponse(self,size):
+        #reads the size byte of the payload
+        data=self._serial.read(size)
+        if(len(data)!=size):
+            raise LidarError("Received response too short")
+        return data
+    
+    def getInfo(self):
+        #returns a dict of with principal datas
+        self.sendCmd(self.CMD_GET_INFO)
+        size=self.readDescriptor()
+        raw=self.readResponse(size)
+        return {
+            "model": raw[0],
+            "firmware": (raw[2],raw[1]),
+            "hardware": raw[3],
+            "serial": raw[3:].hex().upper()
+        }
+
+    def getHealth(self):
+        #returns a tuple of status,error_code
+        self.sendCmd(self.CMD_GET_HEALTH)
+        size=self.readDescriptor()
+        raw=self.readResponse(size)
+        statusMap={0:"Good",1:"Warning",2:"Error"}
+        status=statusMap.get(raw[0],"Unknown")
+        err=(raw[1]<<8) | raw[2]
+        return status,err
+    
+    def startScan(self):
+        #start scan in normal mode
+        self.sendCmd(self.CMD_START)
+        _=self.readDescriptor()
+
+
