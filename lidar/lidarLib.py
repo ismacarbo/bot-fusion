@@ -32,9 +32,18 @@ class Lidar:
     def start_motor(self):
         #starts the motor
         self._serial.setDTR(False)
+        payload = struct.pack("<H", self._motor_speed)
+    
+        packet = bytes([self.SYNC_A, self.SET_PWM_BYTE, 2]) + payload
+        checksum = 0
+        for b in packet:
+            checksum ^= b
+        packet += bytes([checksum])
+        self._serial.write(packet)
 
         self.motor_running = True
-        time.sleep(0.1)
+        time.sleep(0.1)  
+
 
     def stop_motor(self):
         #stops the motor
@@ -89,6 +98,7 @@ class Lidar:
     
     def getInfo(self):
         #returns a dict of with principal datas
+        self._serial.reset_input_buffer()
         self.sendCmd(self.CMD_GET_INFO)
         size=self.readDescriptor()
         raw=self.readResponse(size)
@@ -114,6 +124,7 @@ class Lidar:
         if not self.motor_running:
             self.start_motor()
         self.sendCmd(self.CMD_START)
+        time.sleep(0.1)
         _=self.readDescriptor()
 
     def stopScan(self):
