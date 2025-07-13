@@ -26,7 +26,7 @@ class Lidar:
     def connect(self):
         #opens the serial and initialize the device
         try:
-            self-serial=serial.Serial(self.port,self.baudrate,timeout=self.timeout)
+            self._serial=serial.Serial(self.port,self.baudrate,timeout=self.timeout)
         except serial.SerialException as e:
             raise LidarError(f"Impossible to open {self.port}:{e}")
         
@@ -46,7 +46,7 @@ class Lidar:
         if len(desc) != self.DESCRIPTOR_LEN:
             raise LidarError("Received Descriptor too short")
         
-        if not (desc[0]==self.SINC_A and desc[1]==self.SYNC_B):
+        if not (desc[0]==self.SYNC_A and desc[1]==self.SYNC_B):
             raise LidarError("Received Descriptor malformed")
         size=desc[2]
         return size
@@ -85,4 +85,33 @@ class Lidar:
         self.sendCmd(self.CMD_START)
         _=self.readDescriptor()
 
+    def stopScan(self):
+        #stops the scan
+        self.sendCmd(self.CMD_STOP)
+        time.sleep(0.1)
 
+    def iterScan(self):
+        #spits out the payload of a scan
+        buffer = []
+        while True:
+            packet = self._serial.read(5)
+            if len(packet) < 5:
+                continue
+            new_scan, quality, angle, dist = self._process_scan(packet)
+            if new_scan and buffer:
+                yield buffer
+                buffer = []
+            if dist > 0:
+                buffer.append((quality, angle, dist))
+
+    @staticmethod
+    def procesScan(raw):
+        #data parsing
+        b0, b1, b2, b3, b4 = raw
+        new = bool(b0 & 0x1)
+        if new != bool((b0 >> 1) & 0x1) ^ True:
+            raise LidarError("Flag scan mismatch")
+        quality = b0 >> 2
+        angle = (((b1 >> 1) | (b2 << 7)) / 64.0)  
+        dist  = ((b3 | (b4 << 8)) / 4.0)        
+        return new, quality, angle, dist
