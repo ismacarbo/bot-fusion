@@ -33,13 +33,6 @@ class Lidar:
         #starts the motor
         self._serial.setDTR(False)
 
-        packet = bytes([self.SYNC_A, self.SET_PWM_BYTE, 2]) + payload
-        checksum = 0
-        for b in packet:
-            checksum ^= b
-        packet += bytes([checksum])
-        self._serial.write(packet)
-
         self.motor_running = True
         time.sleep(0.1)
 
@@ -61,6 +54,8 @@ class Lidar:
         #opens the serial and initialize the device
         try:
             self._serial=serial.Serial(self.port,self.baudrate,timeout=self.timeout)
+            self._serial.reset_input_buffer()
+            self._serial.reset_output_buffer()
         except serial.SerialException as e:
             raise LidarError(f"Impossible to open {self.port}:{e}")
         
