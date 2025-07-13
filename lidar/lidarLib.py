@@ -80,14 +80,20 @@ class Lidar:
     
     def readDescriptor(self):
         #reads and checks the descriptor of response
-        desc=self._serial.read(self.DESCRIPTOR_LEN)
-        if len(desc) != self.DESCRIPTOR_LEN:
-            raise LidarError("Received Descriptor too short")
-        
-        if not (desc[0]==self.SYNC_A and desc[1]==self.SYNC_B):
-            raise LidarError("Received Descriptor malformed")
-        size=desc[2]
-        return size
+        sync = bytearray()
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            b = self._serial.read(1)
+            if not b:
+                break
+            sync += b
+            if len(sync) >= 2 and sync[-2] == self.SYNC_A and sync[-1] == self.SYNC_B:
+                rest = self._serial.read(self.DESCRIPTOR_LEN - 2)
+                if len(rest) != self.DESCRIPTOR_LEN - 2:
+                    raise LidarError("Received Descriptor too short")
+                desc = bytes([self.SYNC_A, self.SYNC_B]) + rest
+                return desc[2]
+        raise LidarError("Timeout waiting for valid descriptor")
     
     def readResponse(self,size):
         #reads the size byte of the payload
