@@ -17,11 +17,31 @@ class Lidar:
 
     DESCRIPTOR_LEN = 7
 
+    SET_PWM_BYTE = 0xF0
+    DEFAULT_MOTOR_PWM = 660
+    MAX_MOTOR_PWM = 1023
+
     def __init__(self, port, baudrate=115200, timeout=1.0):
         self.port=port
         self.baudrate=baudrate
         self.timeout=timeout
         self._serial=None
+        self._motor_speed = self.DEFAULT_MOTOR_PWM
+        self.motor_running = False
+
+    def start_motor(self):
+        #starts the motor
+        self._serial.setDTR(False)
+
+        packet = bytes([self.SYNC_A, self.SET_PWM_BYTE, 2]) + payload
+        checksum = 0
+        for b in packet:
+            checksum ^= b
+        packet += bytes([checksum])
+        self._serial.write(packet)
+
+        self.motor_running = True
+        time.sleep(0.1)
     
     def connect(self):
         #opens the serial and initialize the device
@@ -97,7 +117,7 @@ class Lidar:
             packet = self._serial.read(5)
             if len(packet) < 5:
                 continue
-            new_scan, quality, angle, dist = self._process_scan(packet)
+            new_scan, quality, angle, dist = self.procesScan(packet)
             if new_scan and buffer:
                 yield buffer
                 buffer = []
