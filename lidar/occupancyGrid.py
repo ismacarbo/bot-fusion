@@ -62,3 +62,10 @@ class OccupancyGrid:
             #impact cell
             if 0<=i1<self.height and 0<=j1<self.width:
                 self.log_odds[i1,j1]+=self.L_OCC
+
+    
+    def clampLogOdds(self,lMin=-10,lMax=10):
+        self.log_odds=np.clip(self.log_odds,lMin,lMax)
+
+    def getProbabiltyMap(self):
+        return 1-1/(1+np.exp(self.log_odds))
