@@ -1,6 +1,10 @@
 import numpy as np
 
 class OccupancyGrid:
+
+    L_FREE = np.log(0.3/0.7)
+    L_OCC  = np.log(0.9/0.1)
+
     def __init__(self,xMin,xMax,yMin,yMax,resolution):
         self.resolution=resolution
         self.width=int(np.ceil((xMax-yMin)/resolution))
@@ -40,3 +44,21 @@ class OccupancyGrid:
                 err += di
                 j += sj
         return cells
+    
+    def inverse_sensor_update(self,robotPose,scan):
+        xR,yR,thetaR=robotPose
+        i0,j0=self.world_to_map(xR,yR)
+        
+        for angle,dist in scan:
+            #impact point in world cordinates
+            xHit,yHit=xR+dist*np.cos(thetaR+angle),yR+dist*np.sin(thetaR+angle)
+            i1,j1=self.world_to_map(xHit,yHit)
+
+            #freeing the cells till the obstacle
+            cells=self.BresenhamLine(i0,j0,i1,j1)
+            for i,j in cells:
+                self.log_odds[i,j]+=self.L_FREE
+
+            #impact cell
+            if 0<=i1<self.height and 0<=j1<self.width:
+                self.log_odds[i1,j1]+=self.L_OCC
