@@ -1,6 +1,7 @@
 import occupancyGrid as og
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 
 grid = og.OccupancyGrid(xMin=-10, xMax=10, yMin=-10, yMax=10, resolution=0.1)

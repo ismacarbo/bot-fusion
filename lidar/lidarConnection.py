@@ -1,7 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from lidarLib import Lidar
+import requests
 
+url = ""
 
 lidar = Lidar('/dev/ttyUSB0')
 lidar.connect()
@@ -24,9 +26,22 @@ try:
         xs = rs * np.cos(thetas)
         ys = rs * np.sin(thetas)
 
+        
+        payload = {"points": [
+            {"angle": pt[1], "distance": pt[2], "quality": pt[0]}
+            for pt in scan
+        ]}
+
+        try:
+            r = requests.post(url, json=payload, timeout=1)
+            print("sending:", r.status_code)
+        except requests.RequestException as e:
+            print("Error sending:", e)
+
         scatter.set_offsets(np.column_stack((xs, ys)))
         fig.canvas.draw_idle()
         plt.pause(0.02)
+
 finally:
     lidar.stopScan()
     lidar.disconnect()
