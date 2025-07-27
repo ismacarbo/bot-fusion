@@ -132,6 +132,7 @@ class Lidar:
         self.sendCmd(self.CMD_START)
         time.sleep(0.1)
         _=self.readDescriptor()
+        self._serial.reset_input_buffer()
 
     def stopScan(self):
         #stops the scan
@@ -141,18 +142,33 @@ class Lidar:
             self.stop_motor()
 
     def iterScan(self):
-        #spits out the payload of a scan
         buffer = []
         while True:
-            packet = self._serial.read(5)
-            if len(packet) < 5:
+            
+            b0 = self._serial.read(1)
+            if not b0: 
                 continue
-            new_scan, quality, angle, dist = self.procesScan(packet)
+            b0 = b0[0]
+            
+            if (b0 & 0x1) == 0:
+                continue
+
+            rest = self._serial.read(4)
+            if len(rest) < 4:
+                continue
+            packet = bytes([b0]) + rest
+
+            try:
+                new_scan, quality, angle, dist = self.procesScan(packet)
+            except LidarError:
+                
+                continue
             if new_scan and buffer:
                 yield buffer
                 buffer = []
             if dist > 0:
                 buffer.append((quality, angle, dist))
+
 
     @staticmethod
     def procesScan(raw):
