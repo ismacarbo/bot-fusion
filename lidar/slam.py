@@ -5,6 +5,24 @@ import open3d as o3d
 from lidarLib import Lidar
 from occupancyGrid import OccupancyGrid
 
+#convert scan to point cloud
+def scan_to_pcd(scan):
+    rs     = np.array([pt[2] for pt in scan])
+    thetas = np.deg2rad([pt[1] for pt in scan])
+    xyz = np.vstack((rs * np.cos(thetas),
+                     rs * np.sin(thetas),
+                     np.zeros_like(rs))).T
+    return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz))
+
+#compute ICP (iterative closest point), maps the point cloud pcd_source to pcd_target (optimal transformation T)
+def computeIcp(pcd_source, pcd_target, init=np.eye(4)):
+    threshold = 0.5
+    reg = o3d.pipelines.registration.registration_icp(
+        pcd_source, pcd_target, threshold,
+        init,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint())
+    return reg.transformation
+
 
 class SLAM2D:
 
@@ -52,3 +70,78 @@ class SLAM2D:
         self.initial=result
         self.last_pose=result.atPose2(self.counter)
         return result
+
+
+def main():
+    #grid parameters
+    xMin, xMax, yMin, yMax, res = -10, 10, -10, 10, 0.05
+    grid    = OccupancyGrid(xMin,xMax,yMin,yMax,res)
+    slam    = SLAM2D(sigma_odom=(0.05,0.05,0.02))
+    lidar   = Lidar('/dev/ttyUSB0')
+    scans   = []
+
+    lidar.connect()
+    lidar.startScan()
+
+    fig, ax = plt.subplots()
+    scat = ax.scatter([],[],c='k',s=1)
+    ax.set_aspect('equal','box')
+    ax.set_xlim(xMin*100, xMax*100)
+    ax.set_ylim(yMin*100, yMax*100)
+    plt.ion(); plt.show()
+
+    prev_pcd = None
+
+    try:
+        for scan in lidar.iterScan():
+            scans.append(scan)
+            pcd = scan_to_pcd(scan)
+
+            if prev_pcd is None:
+                T = np.eye(4)
+            else:
+                T = computeIcp(pcd, prev_pcd, init=np.eye(4))
+            slam.add_odometry(T)
+            prev_pcd = pcd
+
+            if slam.counter % 20 == 0 and slam.counter>0:
+                result = slam.optimize()
+                print(f"Optimize @ step {slam.counter}")
+
+            posesol = slam.initial.atPose2(slam.counter)
+            x0,y0,th0 = posesol.x(), posesol.y(), posesol.theta()
+            coords = np.array([ (pt[2]*np.cos(np.deg2rad(pt[1]))+x0*100,
+                                 pt[2]*np.sin(np.deg2rad(pt[1]))+y0*100)
+                                for pt in scan ])
+            scat.set_offsets(coords)
+            fig.canvas.draw_idle()
+            plt.pause(0.01)
+
+    finally:
+        lidar.stopScan()
+        lidar.disconnect()
+        plt.ioff()
+        plt.close()
+
+    
+    print("Building final occupancy grid…")
+    result = slam.optimize()
+    for i in range(slam.counter+1):
+        pose_i = result.atPose2(i)
+        x, y, th = pose_i.x(), pose_i.y(), pose_i.theta()
+        grid.inverse_sensor_update((x, y, th), scans[i])
+    grid.clampLogOdds()
+    prob = grid.getProbabilityMap()
+
+
+    plt.figure(figsize=(6,6))
+    plt.title("Occupancy Grid SLAM")
+    plt.imshow(prob, origin='lower',
+               extent=(xMin, xMax, yMin, yMax),
+               cmap='gray_r')
+    plt.xlabel("X [m]")
+    plt.ylabel("Y [m]")
+    plt.show()
+
+if __name__ == "__main__":
+    main()
