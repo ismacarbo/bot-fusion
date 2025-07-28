@@ -5,6 +5,8 @@ import open3d as o3d
 from lidarLib import Lidar
 from occupancyGrid import OccupancyGrid
 
+MAX_STEPS=500
+
 #convert scan to point cloud
 def scan_to_pcd(scan):
     rs     = np.array([pt[2] for pt in scan])
@@ -108,6 +110,9 @@ def main():
                 result = slam.optimize()
                 print(f"Optimize @ step {slam.counter}")
 
+            if slam.counter >= MAX_STEPS:
+                break
+
             posesol = slam.initial.atPose2(slam.counter)
             x0,y0,th0 = posesol.x(), posesol.y(), posesol.theta()
             coords = np.array([ (pt[2]*np.cos(np.deg2rad(pt[1]))+x0*100,
@@ -126,10 +131,12 @@ def main():
     
     print("Building final occupancy grid…")
     result = slam.optimize()
-    for i in range(slam.counter+1):
+    for i in range(len(scans)):
         pose_i = result.atPose2(i)
-        x, y, th = pose_i.x(), pose_i.y(), pose_i.theta()
-        grid.inverse_sensor_update((x, y, th), scans[i])
+        grid.inverse_sensor_update(
+            (pose_i.x(), pose_i.y(), pose_i.theta()),
+            scans[i]
+        )
     grid.clampLogOdds()
     prob = grid.getProbabilityMap()
 
@@ -141,6 +148,7 @@ def main():
                cmap='gray_r')
     plt.xlabel("X [m]")
     plt.ylabel("Y [m]")
+    plt.savefig("occupancy_grid.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 if __name__ == "__main__":

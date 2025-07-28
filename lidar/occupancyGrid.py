@@ -44,7 +44,7 @@ class OccupancyGrid:
         xR, yR, thetaR = robotPose
         i0, j0 = self.world_to_map(xR, yR)
 
-        for angle, dist in scan:
+        for _,angle, dist in scan:
             # impact point in world coordinates
             xHit = xR + dist * np.cos(thetaR + angle)
             yHit = yR + dist * np.sin(thetaR + angle)
