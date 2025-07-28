@@ -87,13 +87,15 @@ def main():
 
     fig, ax = plt.subplots()
     scat = ax.scatter([],[],c='k',s=1)
+    traj_line, = ax.plot([], [], 'r-', linewidth=2)
     ax.set_aspect('equal','box')
-    ax.set_xlim(xMin*100, xMax*100)
-    ax.set_ylim(yMin*100, yMax*100)
+    ax.set_xlim(xMin, xMax)
+    ax.set_ylim(yMin, yMax)
     plt.ion(); plt.show()
 
-    prev_pcd = None
 
+    prev_pcd = None
+    traj_x, traj_y = [0], [0]
     try:
         for scan in lidar.iterScan():
             scans.append(scan)
@@ -104,6 +106,9 @@ def main():
             else:
                 T = computeIcp(pcd, prev_pcd, init=np.eye(4))
             slam.addOdom(T)
+            pose=slam.last_pose
+            traj_x.append(pose.x())
+            traj_y.append(pose.y())
             prev_pcd = pcd
 
             if slam.counter % 20 == 0 and slam.counter>0:
@@ -115,10 +120,11 @@ def main():
 
             posesol = slam.initial.atPose2(slam.counter)
             x0,y0,th0 = posesol.x(), posesol.y(), posesol.theta()
-            coords = np.array([ (pt[2]*np.cos(np.deg2rad(pt[1]))+x0*100,
-                                 pt[2]*np.sin(np.deg2rad(pt[1]))+y0*100)
+            coords = np.array([ (pt[2]*np.cos(np.deg2rad(pt[1]))+x0,
+                                 pt[2]*np.sin(np.deg2rad(pt[1]))+y0)
                                 for pt in scan ])
             scat.set_offsets(coords)
+            traj_line.set_data(traj_x, traj_y)
             fig.canvas.draw_idle()
             plt.pause(0.01)
 
