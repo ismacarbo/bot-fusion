@@ -74,7 +74,7 @@ class SLAM2D:
 
 def main():
     #grid parameters
-    xMin, xMax, yMin, yMax, res = -10, 10, -10, 10, 0.05
+    xMin, xMax, yMin, yMax, res = -100, 100, -100, 100, 0.5
     grid    = OccupancyGrid(xMin,xMax,yMin,yMax,res)
     slam    = SLAM2D(sigma_odom=(0.05,0.05,0.02))
     lidar   = Lidar('/dev/ttyUSB0')
@@ -101,7 +101,7 @@ def main():
                 T = np.eye(4)
             else:
                 T = computeIcp(pcd, prev_pcd, init=np.eye(4))
-            slam.add_odometry(T)
+            slam.addOdom(T)
             prev_pcd = pcd
 
             if slam.counter % 20 == 0 and slam.counter>0:
