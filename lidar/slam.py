@@ -42,3 +42,13 @@ class SLAM2D:
         self.initial.insert(i,estimate)
         self.last_pose=estimate
         self.counter +=1
+
+    def optimize(self):
+        #run the optimizer
+        params=gtsam.LevenbergMarquardtParams() #optimization algorithm (fitting parameters)
+        optimizer=gtsam.LevenbergMarquardtOptimizer(self.graph,self.initial,params)
+        result=optimizer.optimize()
+        #updating the values
+        self.initial=result
+        self.last_pose=result.atPose2(self.counter)
+        return result
