@@ -2,81 +2,68 @@
 #include <Wire.h>
 #include <MPU6050.h>
 
-
 #define PIN_Motor_PWMA 5
 #define PIN_Motor_PWMB 6
 #define PIN_Motor_AIN_1 7
 #define PIN_Motor_BIN_1 8
 #define PIN_Motor_STBY 3
 
-
 #define PIN_TRIG  13
 #define PIN_ECHO  12
 #define PIN_SERVO 10
 Servo head;
-
 
 #define PIN_IR_LEFT  A2
 #define PIN_IR_RIGHT A3
 bool IR_ACTIVE_HIGH = true;
 int  irThreshL = 600, irThreshR = 600;
 
-
-const int PWM_FWD  = 90;
-const int PWM_BACK = 80;
-const int PWM_TURN = 100;
+const int PWM_FWD  = 130;
+const int PWM_BACK = 110;
+const int PWM_TURN = 160;
 const int DEADZONE_PWM = 0;
 
 const int MIN_DIST_CM = 25;
 const int BACK_MS     = 300;
 const int TURN_MS     = 400;
 
-
-int       SERVO_CMD_CENTER = 1;   
-int       SERVO_SWING      = 10;    
+int       SERVO_CMD_CENTER = 1;
+int       SERVO_SWING      = 10;
 const int SERVO_SETTLE_MS  = 120;
 const int SERVO_DWELL_MS   = 140;
-
 
 const unsigned long PULSE_TIMEOUT_US = 30000UL;
 const int SAMPLES_MEDIAN = 3;
 
-
 const int MAX_SCORE_DIST_CM = 90;
 const int SLOWDOWN_DIST_CM  = 60;
-const int MIN_CRUISE_PWM    = 60;
-const int TURN_GAIN         = 90;
+const int MIN_CRUISE_PWM    = 80;
+const int TURN_GAIN         = 120;
 const int IR_WEIGHT         = 1;
 
-
 MPU6050 mpu;
-float gyro_z_offset = 0.0f;     
+float gyro_z_offset = 0.0f;
 unsigned long last_imu_ms = 0;
-float yaw_rad = 0.0f;           
-float yaw_rate_dps = 0.0f;      
+float yaw_rad = 0.0f;
+float yaw_rate_dps = 0.0f;
 const float DPS_TO_RAD = 0.017453292519943295f;
 
 const float YAW_DAMP_GAIN = 1.2f;
-
 
 enum State { RUN, EMERG_BACK, EMERG_TURN };
 State state = RUN;
 unsigned long state_t0 = 0;
 int bestTurn = 0;
 
-
 unsigned long last_telemetry = 0;
 const unsigned long TELEMETRY_MS = 100;
-
 
 int distL = -1, distC = -1, distR = -1;
 int currentServoDeg = 0;
 unsigned long servo_t0 = 0;
 int servoPhase = 0;
 
-
 int last_pwmL = 0, last_pwmR = 0;
-
 
 inline int clampi(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
 inline int clampServo(int v){ return clampi(v, 0, 180); }
@@ -112,7 +99,6 @@ void setMotorsForwardDifferential(int base, int turn){
 void setMotorsBackward(int pwm){ setMotorsRaw(-clampi(pwm,0,255), -clampi(pwm,0,255)); }
 void stopMotors(){ setMotorsRaw(0,0); }
 
-
 long measurePulse(){
   digitalWrite(PIN_TRIG, LOW); delayMicroseconds(2);
   digitalWrite(PIN_TRIG, HIGH); delayMicroseconds(10);
@@ -140,12 +126,10 @@ int readDistanceCm(){
   return median3(a,b,c);
 }
 
-
 int readIRRaw(int pin){ return analogRead(pin); }
 bool irTriggered(int raw, int thresh){
   return IR_ACTIVE_HIGH ? (raw > thresh) : (raw < thresh);
 }
-
 
 char lastCmd = 0;
 void pollSerialCmd(){
@@ -160,7 +144,6 @@ void pollSerialCmd(){
   }
 }
 
-
 void autoCalibrateIR(){
   long sumL=0, sumR=0;
   const int N=50;
@@ -174,7 +157,6 @@ void autoCalibrateIR(){
   irThreshL = clampi(baseL + (IR_ACTIVE_HIGH?margin:-margin), 0, 1023);
   irThreshR = clampi(baseR + (IR_ACTIVE_HIGH?margin:-margin), 0, 1023);
 }
-
 
 void imuInit(){
   mpu.initialize();
@@ -196,28 +178,23 @@ void imuUpdate(){
   float dt = (now - last_imu_ms) / 1000.0f;
   if (dt <= 0.0f) { last_imu_ms = now; return; }
   last_imu_ms = now;
-
   int16_t ax,ay,az,gx,gy,gz;
   mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
-
   float gz_dps = (gz - gyro_z_offset) / 131.0f;
   yaw_rate_dps = gz_dps;
   float gz_rad = gz_dps * DPS_TO_RAD;
   yaw_rad += gz_rad * dt;
-
   if (yaw_rad > 3.14159265f)  yaw_rad -= 6.28318531f;
   if (yaw_rad < -3.14159265f) yaw_rad += 6.28318531f;
 }
-
 
 void updateServoScan(){
   unsigned long now = millis();
   if (now - servo_t0 < (unsigned long)SERVO_DWELL_MS) return;
   servo_t0 = now;
-
   if (servoPhase == 0){
     servoLeft();  delay(SERVO_SETTLE_MS);
-    imuUpdate();  
+    imuUpdate();
     distL = readDistanceCm();
     servoPhase = 1;
   }
@@ -241,95 +218,80 @@ void updateServoScan(){
   }
 }
 
-
 void decideSteeringAndDrive(int irLraw, int irRraw){
   bool irL = irTriggered(irLraw, irThreshL);
   bool irR = irTriggered(irRraw, irThreshR);
-
   int dL = distL<0?0:distL, dC = distC<0?0:distC, dR = distR<0?0:distR;
   int cL = capDist(dL, MAX_SCORE_DIST_CM);
   int cC = capDist(dC, MAX_SCORE_DIST_CM);
   int cR = capDist(dR, MAX_SCORE_DIST_CM);
-
   int numL = cL, numR = cR;
   if (irL) numL -= (MAX_SCORE_DIST_CM * IR_WEIGHT);
   if (irR) numR -= (MAX_SCORE_DIST_CM * IR_WEIGHT);
-
   int steerNum = clampi(numL - numR, -MAX_SCORE_DIST_CM, MAX_SCORE_DIST_CM);
   int turnPWM = (steerNum * TURN_GAIN) / MAX_SCORE_DIST_CM;
-
-  
   turnPWM -= (int)(YAW_DAMP_GAIN * yaw_rate_dps);
-
   int base = PWM_FWD;
   if (cC < SLOWDOWN_DIST_CM){
-    int scale = 30 + (70 * cC) / SLOWDOWN_DIST_CM;   
+    int scale = 30 + (70 * cC) / SLOWDOWN_DIST_CM;
     base = clampi((PWM_FWD * scale)/100, MIN_CRUISE_PWM, PWM_FWD);
   }
-
   setMotorsForwardDifferential(base, turnPWM);
 }
 
-
 void setup(){
   Serial.begin(115200);
-
   pinMode(PIN_Motor_PWMA, OUTPUT);
   pinMode(PIN_Motor_PWMB, OUTPUT);
   pinMode(PIN_Motor_AIN_1, OUTPUT);
   pinMode(PIN_Motor_BIN_1, OUTPUT);
   pinMode(PIN_Motor_STBY, OUTPUT);
   digitalWrite(PIN_Motor_STBY, HIGH);
-
   pinMode(PIN_TRIG, OUTPUT);
   pinMode(PIN_ECHO, INPUT);
-
   Wire.begin();
   imuInit();
-
   head.attach(PIN_SERVO);
   servoCenter();
   delay(300);
-
   pinMode(PIN_IR_LEFT, INPUT);
   pinMode(PIN_IR_RIGHT, INPUT);
   autoCalibrateIR();
-
   stopMotors();
   state = RUN;
   state_t0 = millis();
   servo_t0 = millis();
   servoPhase = 0;
-
   Serial.println(F("READY, obstacle avoidance + IMU"));
 }
 
 void loop(){
   pollSerialCmd();
-  imuUpdate();        
-  updateServoScan();  
-
+  imuUpdate();
+  updateServoScan();
   int irLraw = readIRRaw(PIN_IR_LEFT);
   int irRraw = readIRRaw(PIN_IR_RIGHT);
   bool irL = irTriggered(irLraw, irThreshL);
   bool irR = irTriggered(irRraw, irThreshR);
-
   int dC = distC<0?999:distC;
   bool nearObstacle = (dC <= MIN_DIST_CM) || (irL && irR);
-
   unsigned long now = millis();
-
   switch (state){
     case RUN:
       if (nearObstacle){
         stopMotors();
         state = EMERG_BACK;
         state_t0 = now;
+      } else if (irL && !irR){
+        servoCenter();
+        setMotorsRaw(+PWM_TURN, -PWM_TURN);
+      } else if (irR && !irL){
+        servoCenter();
+        setMotorsRaw(-PWM_TURN, +PWM_TURN);
       } else {
         decideSteeringAndDrive(irLraw, irRraw);
       }
       break;
-
     case EMERG_BACK:
       servoCenter();
       setMotorsBackward(PWM_BACK);
@@ -341,7 +303,6 @@ void loop(){
         state_t0 = now;
       }
       break;
-
     case EMERG_TURN:
       servoCenter();
       if (bestTurn > 0) setMotorsRaw(-PWM_TURN, +PWM_TURN);
@@ -353,7 +314,6 @@ void loop(){
       }
       break;
   }
-
   if (now - last_telemetry >= TELEMETRY_MS){
     last_telemetry = now;
     float yaw_deg = yaw_rad * (180.0f/3.14159265f);
