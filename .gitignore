@@ -1,2 +1,16 @@
 /.vscode
 committer.sh
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+.DS_Store
+.env
+.env.*
+instance/
+.pytest_cache/
+htmlcov/
+.coverage

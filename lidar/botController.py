@@ -1,365 +1,312 @@
 
-
-
-
-
-
-
-import argparse, math, time, sys
+import argparse, math, threading, time
+import pygame
 import numpy as np
-from collections import deque
 import serial
 
-from lidarLib import Lidar               
-from occupancyGrid import OccupancyGrid  
+from lidarLib import Lidar, LidarError
+from occupancyGrid import OccupancyGrid2D, RollingOccupancyGrid2D
 
-def setup_matplotlib(headless: bool):
-    import matplotlib
-    if headless:
-        matplotlib.use('Agg')
-        backend = 'Agg'
-    else:
+def parse_args():
+    ap = argparse.ArgumentParser(description="Realtime global map + last-scan overlay")
+    ap.add_argument("--serial", default="/dev/ttyACM0")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--lidar", default="/dev/ttyUSB0")
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--width", type=int, default=1100)
+    ap.add_argument("--height", type=int, default=900)
+
+    
+    ap.add_argument("--kv", type=float, default=0.0035, help="m/s per 1 PWM")
+    ap.add_argument("--deadzone", type=int, default=0, help="pwm sotto cui v≈0")
+
+    
+    ap.add_argument("--map-min", nargs=2, type=float, default=[-10.0, -10.0])
+    ap.add_argument("--map-max", nargs=2, type=float, default=[+10.0, +10.0])
+    ap.add_argument("--res", type=float, default=0.05, help="cell size (m)")
+
+    
+    ap.add_argument("--view-radius", type=float, default=6.0)
+    return ap.parse_args()
+
+
+class Shared:
+    def __init__(self, args):
+        self.lock = threading.Lock()
         
-        try:
-            matplotlib.use('TkAgg')
-            backend = 'TkAgg'
-        except Exception:
-            try:
-                matplotlib.use('Qt5Agg')
-                backend = 'Qt5Agg'
-            except Exception:
-                matplotlib.use('Agg')
-                backend = 'Agg'
-                headless = True
-    import matplotlib.pyplot as _plt
-    return _plt, backend, headless
+        self.t = {
+            "ms": 0, "distC": -1, "distL": -1, "distR": -1,
+            "irL": 0, "irR": 0, "servo": 0,
+            "pwmL": 0, "pwmR": 0, "state": 0,
+            "yaw_deg": 0.0, "yaw_rate_dps": 0.0
+        }
+        self.last_ms = None
 
-class BotController:
-    def __init__(self, plt, headless, out_map="map_latest.png", out_tel="telemetry_latest.png",
-                 port_serial="/dev/ttyACM0", port_lidar="/dev/ttyUSB0",
-                 baud=115200,
-                 kv=0.0035, deadzone=20,
-                 wheel_base=0.15,
-                 grid=( -6.0, 6.0, -6.0, 6.0 ),
-                 res=0.05,
-                 imu_direct=True,
-                 clamp_dist_m=8.0,
-                 update_ms=50,
-                 history_secs=30,
-                 save_every_s=0.5):
-        self.plt = plt
-        self.headless = headless
-        self.out_map = out_map
-        self.out_tel = out_tel
-
-        self.port_serial = port_serial
-        self.port_lidar  = port_lidar
-        self.baud        = baud
-
-        self.KV = float(kv)
-        self.DZ = int(deadzone)
-        self.WHEEL_BASE = float(wheel_base)
-
-        xMin, xMax, yMin, yMax = grid
-        self.grid = OccupancyGrid(xMin, xMax, yMin, yMax, float(res))
-        self.grid_last_update = 0.0
-        self.grid_update_dt   = 0.10
-
+        
         self.x = 0.0
         self.y = 0.0
-        self.th = 0.0
-
-        self.imu_direct = bool(imu_direct)
-        self.FUSE_ALPHA = 0.9
-
-        self.clamp_dist_m = float(clamp_dist_m)
-        self.update_ms = int(update_ms)
-
-        self.ser = serial.Serial(self.port_serial, self.baud, timeout=0.0)
-        time.sleep(2.0)
-
-        self.lidar = Lidar(self.port_lidar)
-        self.lidar.connect()
-        print("[LIDAR] INFO:", self.lidar.getInfo())
-        print("[LIDAR] HEALTH:", self.lidar.getHealth())
-        self.lidar.startScan()
-
-        self.last_ser = None
-        self.t0 = time.time()
-        self.last_time = self.t0
+        self.theta = 0.0  
 
         
-        self.fig_map, self.ax_map = self.plt.subplots(1, 1, figsize=(6.5,6))
-        self.im = self.ax_map.imshow(
-            np.zeros_like(self.grid.log_odds),
-            origin='lower',
-            extent=(xMin, xMax, yMin, yMax),
-            cmap='gray_r',
-            vmin=0.0, vmax=1.0
+        self.last_scan_world = []  
+        self.lidar_ok = False
+
+        
+        xmin, ymin = args.map_min
+        xmax, ymax = args.map_max
+        self.grid = RollingOccupancyGrid2D(
+            xmin, xmax, ymin, ymax, args.res,
+            K=6, lo_free=-1.0, lo_occ=+1.8,
+            min_hit_range=0.12, max_hit_range=args.view_radius, quality_min=0
         )
-        self.scan_plot = self.ax_map.plot([], [], '.', markersize=1)[0]
-        self.pose_plot = self.ax_map.plot([], [], 'ro', markersize=5)[0]
-        self.ax_map.set_title("Occupancy Grid + LiDAR")
-        self.ax_map.set_aspect('equal', 'box')
-        self.ax_map.set_xlim(xMin, xMax)
-        self.ax_map.set_ylim(yMin, yMax)
-        self.fig_map.tight_layout()
 
         
-        self.fig_plot, (self.ax_yaw, self.ax_pwm, self.ax_dist) = self.plt.subplots(3, 1, figsize=(8,7), sharex=True)
-        self.ax_yaw.set_ylabel("Yaw (deg) / YawRate (dps)")
-        self.ax_pwm.set_ylabel("PWM L/R")
-        self.ax_dist.set_ylabel("Dist (cm)")
-        self.ax_dist.set_xlabel("Time (s)")
+        self.kv = args.kv
+        self.deadzone = args.deadzone
 
-        N = max(200, int(history_secs * (1000.0/max(1,update_ms))))
-        self.ts = deque(maxlen=N)
-        self.yaw_deg_hist = deque(maxlen=N)
-        self.yaw_rate_hist = deque(maxlen=N)
-        self.pwmL_hist = deque(maxlen=N)
-        self.pwmR_hist = deque(maxlen=N)
-        self.dC_hist = deque(maxlen=N)
-        self.dL_hist = deque(maxlen=N)
-        self.dR_hist = deque(maxlen=N)
+    def snapshot_pose(self):
+        with self.lock:
+            return self.x, self.y, self.theta
 
-        (self.l_yaw,) = self.ax_yaw.plot([], [], label="yaw_deg")
-        (self.l_wz,)  = self.ax_yaw.plot([], [], label="yaw_rate_dps")
-        self.ax_yaw.legend(loc="upper right")
 
-        (self.l_pwmL,) = self.ax_pwm.plot([], [], label="pwmL")
-        (self.l_pwmR,) = self.ax_pwm.plot([], [], label="pwmR")
-        self.ax_pwm.legend(loc="upper right")
+def arduino_thread(port, baud, shared: Shared):
+    try:
+        ser = serial.Serial(port, baud, timeout=1)
+        time.sleep(2.0)
+        print(f"[SER] Connected to {port} @ {baud}")
+    except serial.SerialException as e:
+        print(f"[SER] ERROR opening {port}: {e}")
+        return
 
-        (self.l_dC,) = self.ax_dist.plot([], [], label="distC")
-        (self.l_dL,) = self.ax_dist.plot([], [], label="distL")
-        (self.l_dR,) = self.ax_dist.plot([], [], label="distR")
-        self.ax_dist.legend(loc="upper right")
-
-        self.fig_plot.tight_layout()
-
-        if not self.headless:
-            self.plt.ion()
-            self.fig_map.show()
-            self.fig_plot.show()
-
-        self.last_save = 0.0
-        self.save_every_s = float(save_every_s)
-        print(f"[INFO] headless={self.headless}  (map->{self.out_map}, telemetry->{self.out_tel})")
-
-    def close(self):
-        try:
-            self.lidar.stopScan()
-            self.lidar.disconnect()
-        except Exception:
-            pass
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except Exception:
-            pass
-
-    
-    def _parse_serial_line(self, line):
-        parts = line.strip().split(',')
-        if len(parts) < 13 or parts[0] != 'STAT':
-            return None
-        try:
-            return {
-                't_ms':   int(parts[1]),
-                'distC':  int(parts[2]),
-                'distL':  int(parts[3]),
-                'distR':  int(parts[4]),
-                'pwmL':   int(parts[7]),  
-                'pwmR':   int(parts[8]),
-                'yaw_deg':       float(parts[11]),
-                'yaw_rate_dps':  float(parts[12]),
-            }
-        except Exception:
-            return None
-
-    def read_serial_nonblocking(self):
-        out = None
+    try:
         while True:
-            try:
-                line = self.ser.readline().decode('utf-8', errors='ignore')
-            except Exception:
-                break
-            if not line:
-                break
-            if line.startswith('STAT'):
-                parsed = self._parse_serial_line(line)
-                if parsed:
-                    out = parsed
-        return out
-
-    
-    def _pwm_to_v(self, pwm):
-        s = 1.0 if pwm >= 0 else -1.0
-        ap = abs(pwm)
-        if ap <= self.DZ:
-            return 0.0
-        return s * self.KV * (ap - self.DZ)
-
-    def step_pose(self, dt, sd):
-        pwmL = sd['pwmL']; pwmR = sd['pwmR']
-        vL = self._pwm_to_v(pwmL)
-        vR = self._pwm_to_v(pwmR)
-        v  = 0.5*(vL+vR)
-        w_model = (vR - vL)/self.WHEEL_BASE if self.WHEEL_BASE > 1e-6 else 0.0
-
-        if True:  
-            self.th = math.radians(sd['yaw_deg'])
-        else:
-            th_pred = self.th + w_model*dt
-            th_imu  = math.radians(sd['yaw_deg'])
-            self.th = 0.9 * th_pred + 0.1 * th_imu
-
-        self.th = (self.th + math.pi) % (2*math.pi) - math.pi
-        self.x += v * math.cos(self.th) * dt
-        self.y += v * math.sin(self.th) * dt
-
-    
-    def process_lidar_scan(self, scan):
-        scan_m = []
-        for (q, ang_deg, dist_mm) in scan:
-            d_m = (dist_mm / 1000.0)
-            if d_m <= 0 or d_m > self.clamp_dist_m:
+            line = ser.readline().decode("utf-8", errors="ignore").strip()
+            if not line or not line.startswith("STAT,"):
                 continue
-            ang = math.radians(ang_deg)
-            scan_m.append( (q, ang, d_m) )
+            parts = line.split(",")
+            if len(parts) < 13:
+                continue
 
-        if not scan_m:
-            return None
+            try:
+                vals = {
+                    "ms": int(parts[1]),
+                    "distC": int(parts[2]),
+                    "distL": int(parts[3]),
+                    "distR": int(parts[4]),
+                    "irL": int(parts[5]),
+                    "irR": int(parts[6]),
+                    "servo": int(parts[7]),
+                    "pwmL": int(parts[8]),
+                    "pwmR": int(parts[9]),
+                    "state": int(parts[10]),
+                    "yaw_deg": float(parts[11]),
+                    "yaw_rate_dps": float(parts[12]),
+                }
+            except ValueError:
+                continue
 
-        self.grid.inverse_sensor_update((self.x, self.y, self.th), scan_m)
-        return scan_m
+            with shared.lock:
+                
+                prev_ms = shared.t["ms"]
+                shared.t.update(vals)
+
+                
+                dt = 0.0
+                if shared.last_ms is None:
+                    shared.last_ms = vals["ms"]
+                else:
+                    dt = max(0.0, (vals["ms"] - shared.last_ms) / 1000.0)
+                    shared.last_ms = vals["ms"]
+
+                
+                shared.theta = math.radians(vals["yaw_deg"])
+
+                
+                pwmL = vals["pwmL"]
+                pwmR = vals["pwmR"]
+                if abs(pwmL) < shared.deadzone: pwmL = 0
+                if abs(pwmR) < shared.deadzone: pwmR = 0
+                vL = shared.kv * pwmL
+                vR = shared.kv * pwmR
+                v = 0.5 * (vL + vR)
+
+                
+                if dt > 0.0:
+                    shared.x += v * dt * math.cos(shared.theta)
+                    shared.y += v * dt * math.sin(shared.theta)
+
+    except Exception as e:
+        print(f"[SER] thread stopped: {e}")
+    finally:
+        try: ser.close()
+        except: pass
+
+
+def lidar_thread(dev, shared: Shared):
+    try:
+        ld = Lidar(dev)
+        ld.connect()
+        print("[LIDAR] INFO:", ld.getInfo())
+        print("[LIDAR] HEALTH:", ld.getHealth())
+        ld.startScan()
+
+        for scan in ld.iterScan():
+            
+            with shared.lock:
+                xR, yR, th = shared.x, shared.y, shared.theta
+
+            
+            world_pts = []
+            
+            grid_scan = []
+            for q, ang_deg, dist_mm in scan:
+                if dist_mm <= 0:
+                    continue
+                ang = math.radians(ang_deg)
+                dist_m = dist_mm / 1000.0
+                
+                xr = dist_m * math.cos(ang)
+                yr = dist_m * math.sin(ang)
+                
+                c, s = math.cos(th), math.sin(th)
+                X = xR + c * xr - s * yr
+                Y = yR + s * xr + c * yr
+                world_pts.append((X, Y))
+                
+                grid_scan.append((0, ang, dist_m))
+
+            
+            with shared.lock:
+                shared.last_scan_world = world_pts
+                shared.lidar_ok = True
+                
+                shared.grid.integrate_scan((xR, yR, th), grid_scan)
+
+    except LidarError as e:
+        print("[LIDAR] error:", e)
+    except Exception as e:
+        print("[LIDAR] thread stopped:", e)
+
+
+def draw_texts(screen, font, tl, t, fps):
+    lines = [
+        f"FPS: {fps:4.1f}  LiDAR: OK",
+        f"dist C/L/R: {t['distC']}/{t['distL']}/{t['distR']} cm",
+        f"IR L/R: {t['irL']}/{t['irR']}  SERVO: {t['servo']} deg",
+        f"PWM L/R: {t['pwmL']}/{t['pwmR']}  state: {t['state']}",
+        f"Yaw: {t['yaw_deg']:.1f}°  YawRate: {t['yaw_rate_dps']:.1f} dps",
+    ]
+    x, y = tl
+    for s in lines:
+        surf = font.render(s, True, (30,30,30))
+        screen.blit(surf, (x, y))
+        y += surf.get_height() + 2
+
+def draw_world_map(screen, rect, shared: Shared, view_radius_m, res):
+    x0, y0, w, h = rect
+    sub = pygame.Surface((w,h))
+    sub.fill((235,235,235))
+
+    with shared.lock:
+        
+        img = shared.grid.to_grayscale()  
+        xmin, ymin = shared.grid.x_min, shared.grid.y_min
+        xmax = shared.grid.x_min + shared.grid.width * res
+        ymax = shared.grid.y_min + shared.grid.height * res
+        xR, yR, th = shared.x, shared.y, shared.theta
+        pts = list(shared.last_scan_world)
+
 
     
-    def _update_plots(self, scan_m):
-        now = time.time()
+    vxmin = xR - view_radius_m
+    vxmax = xR + view_radius_m
+    vymin = yR - view_radius_m
+    vymax = yR + view_radius_m
 
-        if now - self.grid_last_update >= self.grid_update_dt:
-            self.grid_last_update = now
-            prob = self.grid.getProbabilityMap()
-            self.im.set_data(prob)
+    
+    vxmin = max(vxmin, xmin); vxmax = min(vxmax, xmax)
+    vymin = max(vymin, ymin); vymax = min(vymax, ymax)
 
-        if scan_m:
-            xs, ys = [], []
-            for (_, ang, d) in scan_m:
-                xs.append(self.x + d * math.cos(self.th + ang))
-                ys.append(self.y + d * math.sin(self.th + ang))
-            self.scan_plot.set_data(xs, ys)
+    
+    i_min = int((vymin - ymin) / res)
+    i_max = int((vymax - ymin) / res)
+    j_min = int((vxmin - xmin) / res)
+    j_max = int((vxmax - xmin) / res)
 
-        self.pose_plot.set_data([self.x], [self.y])
+    i_min = max(0, min(img.shape[0]-1, i_min))
+    i_max = max(0, min(img.shape[0],   i_max))
+    j_min = max(0, min(img.shape[1]-1, j_min))
+    j_max = max(0, min(img.shape[1],   j_max))
 
-        if self.last_ser:
-            t = now - self.t0
-            self.ts.append(t)
-            self.yaw_deg_hist.append(self.last_ser['yaw_deg'])
-            self.yaw_rate_hist.append(self.last_ser['yaw_rate_dps'])
-            self.pwmL_hist.append(self.last_ser['pwmL'])
-            self.pwmR_hist.append(self.last_ser['pwmR'])
-            self.dC_hist.append(self.last_ser['distC'])
-            self.dL_hist.append(self.last_ser['distL'])
-            self.dR_hist.append(self.last_ser['distR'])
+    if i_max <= i_min or j_max <= j_min:
+        screen.blit(sub, (x0,y0)); return
 
-            T = list(self.ts)
-            self.l_yaw.set_data(T, list(self.yaw_deg_hist))
-            self.l_wz.set_data(T, list(self.yaw_rate_hist))
-            self.ax_yaw.relim(); self.ax_yaw.autoscale_view()
+    crop = img[i_min:i_max, j_min:j_max]
+    
+    crop_rgb = np.stack([np.rot90(crop)]*3, axis=-1)
+    surf = pygame.surfarray.make_surface(crop_rgb)
+    surf = pygame.transform.smoothscale(surf, (w,h))
+    sub.blit(surf, (0,0))
 
-            self.l_pwmL.set_data(T, list(self.pwmL_hist))
-            self.l_pwmR.set_data(T, list(self.pwmR_hist))
-            self.ax_pwm.relim(); self.ax_pwm.autoscale_view()
+    
+    cx = int(w * (xR - vxmin) / (vxmax - vxmin))
+    cy = int(h * (vymax - yR) / (vymax - vymin))
+    pygame.draw.circle(sub, (252,132,3), (cx,cy), 6)
+    xh = cx + int(20 * math.cos(th))
+    yh = cy - int(20 * math.sin(th))
+    pygame.draw.line(sub, (0,0,255), (cx,cy), (xh,yh), 2)
 
-            self.l_dC.set_data(T, list(self.dC_hist))
-            self.l_dL.set_data(T, list(self.dL_hist))
-            self.l_dR.set_data(T, list(self.dR_hist))
-            self.ax_dist.relim(); self.ax_dist.autoscale_view()
+    
+    for (X,Y) in pts[::3]:  
+        px = int(w * (X - vxmin) / (vxmax - vxmin))
+        py = int(h * (vymax - Y) / (vymax - vymin))
+        if 0 <= px < w and 0 <= py < h:
+            sub.set_at((px,py), (0,0,0))
 
-            for ax in (self.ax_yaw, self.ax_pwm, self.ax_dist):
-                if len(T) >= 2:
-                    ax.set_xlim(max(0.0, T[-1]-30), T[-1])
+    pygame.draw.rect(sub, (80,80,80), sub.get_rect(), 1)
+    screen.blit(sub, (x0,y0))
 
-        if self.headless:
-            if now - self.last_save >= self.save_every_s:
-                self.last_save = now
-                try:
-                    self.fig_map.savefig(self.out_map, dpi=110, bbox_inches="tight")
-                    self.fig_plot.savefig(self.out_tel, dpi=110, bbox_inches="tight")
-                except Exception as e:
-                    print("[WARN] savefig:", e)
-        else:
-            self.fig_map.canvas.draw_idle()
-            self.fig_plot.canvas.draw_idle()
-            self.plt.pause(0.001)
+def main_loop(args, shared: Shared):
+    pygame.init()
+    screen = pygame.display.set_mode((args.width, args.height))
+    pygame.display.set_caption("Realtime Bot Dashboard (global map)")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(pygame.font.get_default_font(), 18)
 
-    def run(self):
-        print("[INFO] running… Ctrl+C per uscire")
-        try:
-            for scan in self.lidar.iterScan():
-                s = self.read_serial_nonblocking()
-                if s: self.last_ser = s
+    
+    map_rect = (320, 20, args.width-340, args.height-40)  
 
-                now = time.time()
-                dt = now - self.last_time
-                self.last_time = now
-                if self.last_ser:
-                    self.step_pose(dt, self.last_ser)
+    running = True
+    while running:
+        dt = clock.tick(args.fps) / 1000.0
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT: running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key in (pygame.K_q, pygame.K_ESCAPE): running = False
+                elif ev.key == pygame.K_s:
+                    pygame.image.save(screen, "dashboard_global.png")
+                    print("[UI] screenshot salvato")
 
-                scan_m = self.process_lidar_scan(scan)
-                self._update_plots(scan_m)
+        screen.fill((250,250,250))
 
-                if self.update_ms > 0:
-                    target = self.update_ms/1000.0
-                    spent = time.time() - now
-                    if target - spent > 0:
-                        time.sleep(target - spent)
-        except KeyboardInterrupt:
-            print("\n[INFO] stop richiesto")
-        finally:
-            self.close()
-            if not self.headless:
-                self.plt.ioff(); self.plt.show()
+        with shared.lock:
+            t = dict(shared.t)
 
-def main():
-    ap = argparse.ArgumentParser(description="Bot Controller: headless plotting + occupancy")
-    ap.add_argument("--serial", default="/dev/ttyACM0")
-    ap.add_argument("--lidar",  default="/dev/ttyUSB0")
-    ap.add_argument("--baud",   type=int, default=115200)
-    ap.add_argument("--kv",     type=float, default=0.0035)
-    ap.add_argument("--dz",     type=int,   default=20)
-    ap.add_argument("--wheel-base", type=float, default=0.15)
-    ap.add_argument("--grid", nargs=4, type=float, default=[-6.0,6.0,-6.0,6.0],
-                    metavar=('xmin','xmax','ymin','ymax'))
-    ap.add_argument("--res", type=float, default=0.05)
-    ap.add_argument("--clamp-dist", type=float, default=8.0)
-    ap.add_argument("--update-ms",  type=int, default=50)
-    ap.add_argument("--headless", dest="headless", action="store_true", default=True)
-    ap.add_argument("--no-headless", dest="headless", action="store_false")
-    ap.add_argument("--out-map", default="map_latest.png")
-    ap.add_argument("--out-telemetry", default="telemetry_latest.png")
-    args = ap.parse_args()
+        draw_texts(screen, font, (20,20), t, clock.get_fps())
+        draw_world_map(screen, map_rect, shared, args.view_radius, args.res)
 
-    plt, backend, headless = setup_matplotlib(args.headless)
-    print(f"[INFO] matplotlib backend: {backend} (headless={headless})")
+        pygame.display.flip()
 
-    bc = BotController(
-        plt=plt, headless=headless,
-        out_map=args.out_map, out_tel=args.out_telemetry,
-        port_serial=args.serial,
-        port_lidar=args.lidar,
-        baud=args.baud,
-        kv=args.kv,
-        deadzone=args.dz,
-        wheel_base=args.wheel_base,
-        grid=tuple(args.grid),
-        res=args.res,
-        imu_direct=True,
-        clamp_dist_m=args.clamp_dist,
-        update_ms=args.update_ms
-    )
-    bc.run()
+    pygame.quit()
+
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    shared = Shared(args)
+
+    th_ser = threading.Thread(target=arduino_thread, args=(args.serial, args.baud, shared), daemon=True)
+    th_ld  = threading.Thread(target=lidar_thread,   args=(args.lidar, shared), daemon=True)
+    th_ser.start()
+    th_ld.start()
+
+    main_loop(args, shared)
