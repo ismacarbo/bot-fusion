@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 class OccupancyGrid:
     L_FREE = np.log(0.3 / 0.7)
@@ -44,7 +43,21 @@ class OccupancyGrid:
         xR, yR, thetaR = robotPose
         i0, j0 = self.world_to_map(xR, yR)
 
-        for _,angle, dist in scan:
+        for meas in scan:
+            if len(meas) == 3:
+                _, angle, dist = meas
+            elif len(meas) == 2:
+                angle, dist = meas
+            else:
+                continue
+
+            if dist <= 0:
+                continue
+
+            # Compatibility with both radians and degrees input.
+            if abs(angle) > (2 * np.pi + 1e-6):
+                angle = np.deg2rad(angle)
+
             # impact point in world coordinates
             xHit = xR + dist * np.cos(thetaR + angle)
             yHit = yR + dist * np.sin(thetaR + angle)
