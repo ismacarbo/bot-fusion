@@ -1,3 +1,4 @@
+
 import numpy as np
 
 class OccupancyGrid:
@@ -63,11 +64,12 @@ class OccupancyGrid:
             yHit = yR + dist * np.sin(thetaR + angle)
             i1, j1 = self.world_to_map(xHit, yHit)
 
-            # free cells
-            line = OccupancyGrid.bresenhamLine(i0, j0, i1, j1)
-            for (i, j) in line[:-1]:
-                if 0 <= i < self.height and 0 <= j < self.width:
-                    self.log_odds[i, j] += self.L_FREE
+            ray = _bresenham(i0, j0, i1, j1)
+
+            
+            for (ii, jj) in ray[:-1]:
+                if self.in_bounds(ii, jj):
+                    layer[ii, jj] += self.lo_free
 
             # occupied cell
             if 0 <= i1 < self.height and 0 <= j1 < self.width:
