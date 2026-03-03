@@ -306,6 +306,14 @@ class RobotController:
         self.last_rmse = 0.0
         self.last_pairs = 0
 
+    def _on_post_scan(self, raw_scan, local_pts, telem, cmd, front, left, right, scan_idx):
+        # Extension hook for derived controllers (e.g. HTTP streaming).
+        return
+
+    def _on_shutdown(self, scan_idx):
+        # Extension hook for derived controllers.
+        return
+
     def _scan_to_local(self, scan):
         points = []
         grid_scan = []
@@ -490,6 +498,7 @@ class RobotController:
                 self.traj_x.append(self.pose[0])
                 self.traj_y.append(self.pose[1])
                 scan_idx += 1
+                self._on_post_scan(raw_scan, local_pts, telem, cmd, front, left, right, scan_idx)
 
                 if self.viewer is not None and (scan_idx % max(1, self.args.gui_every) == 0):
                     status = [
@@ -542,6 +551,10 @@ class RobotController:
                 self.arduino.disconnect()
             except Exception:
                 pass
+            try:
+                self._on_shutdown(scan_idx)
+            except Exception:
+                pass
 
             self._save_outputs()
             print(f"[INFO] map saved to: {self.args.map_out}")
@@ -552,7 +565,7 @@ class RobotController:
                 plt.show()
 
 
-def parse_args():
+def build_parser():
     parser = argparse.ArgumentParser(
         description="Autonomous robot controller with LiDAR + MPU6050 fusion and occupancy SLAM"
     )
@@ -598,7 +611,11 @@ def parse_args():
     parser.add_argument("--max-scans", type=int, default=0, help="Stop after N scans (0=infinite)")
     parser.add_argument("--map-out", default="robot_map.png", help="Output map image")
     parser.add_argument("--traj-out", default="robot_trajectory.csv", help="Output trajectory CSV")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    return build_parser().parse_args()
 
 
 def main():

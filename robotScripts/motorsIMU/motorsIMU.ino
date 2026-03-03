@@ -1,80 +1,240 @@
+// Low-level controller for Arduino UNO + TB6612FNG.
+// Receives PWM commands from Raspberry Pi and streams IMU + safety sensors.
 #include <Wire.h>
 #include <MPU6050.h>
 #include <math.h>
+#include <string.h>
+#include <stdio.h>
 
-// Motor driver pins (TB6612FNG)
-#define PIN_Motor_PWMA   5
-#define PIN_Motor_PWMB   6
-#define PIN_Motor_AIN_1  7
-#define PIN_Motor_BIN_1  8
-#define PIN_Motor_STBY   3
+#define PIN_Motor_PWMA  5
+#define PIN_Motor_PWMB  6
+#define PIN_Motor_AIN_1 7
+#define PIN_Motor_BIN_1 8
+#define PIN_Motor_STBY  3
 
-// Encoder pins (single-channel, rising edge)
-#define ENCODER_LEFT_PIN  2  // interrupt 0
-#define ENCODER_RIGHT_PIN 3  // interrupt 1
+#define PIN_TRIG  13
+#define PIN_ECHO  12
+#define PIN_IR_LEFT  A2
+#define PIN_IR_RIGHT A3
 
-// Constants for odometry
-const float WHEEL_RADIUS = 0.03f;    // meters (adjust to your wheel)
-const float WHEEL_BASE = 0.15f;      // distance between left/right wheels (meters)
-const int TICKS_PER_REV = 360;        // placeholder: you must measure this
-const float ALPHA = 0.98f;           // complementary filter weight (gyro high-pass)
+const long SERIAL_BAUD = 115200;
+const float GYRO_DPS_TO_RAD = 0.017453292519943295f;
+const float GYRO_RAD_TO_DEG = 57.29577951308232f;
 
-// Conversion
-#define DEG_TO_RAD 0.017453292519943295f
+const int LEFT_SIGN = 1;   // set to -1 if left wheel direction is inverted
+const int RIGHT_SIGN = 1;  // set to -1 if right wheel direction is inverted
+const int SLEW_STEP = 16;
 
-// globals for encoders
-volatile long encoder_left = 0;
-volatile long encoder_right = 0;
+const unsigned long CMD_TIMEOUT_MS = 450;
+const unsigned long TELEMETRY_MS = 50;
+const unsigned long DIST_MS = 90;
+const unsigned long ULTRA_TIMEOUT_US = 25000UL;
 
-// odometry state
-float x = 0.0f, y = 0.0f;            // position in meters
-float theta_enc = 0.0f;              // orientation estimate from encoders
-float theta_fused = 0.0f;            // fused orientation
-float theta_gyro = 0.0f;             // integrated gyro orientation
-
-unsigned long last_odom_time = 0;
-float last_gyro_z = 0.0f;             // for optional smoothing
-
-// MPU6050
 MPU6050 mpu;
-float gyro_z_offset = 0.0f; // to calibrate bias
+float gyro_bias_z = 0.0f;
+float yaw_rad = 0.0f;
+float yaw_rate_dps = 0.0f;
 
-// Utility to read encoder counts safely
-void safeReadEncoders(long &left, long &right) {
-  noInterrupts();
-  left = encoder_left;
-  right = encoder_right;
-  interrupts();
+int target_pwm_l = 0;
+int target_pwm_r = 0;
+int current_pwm_l = 0;
+int current_pwm_r = 0;
+
+int dist_c_cm = 999;
+int ir_l_raw = 0;
+int ir_r_raw = 0;
+
+unsigned long last_cmd_ms = 0;
+unsigned long last_imu_ms = 0;
+unsigned long last_telemetry_ms = 0;
+unsigned long last_dist_ms = 0;
+
+char serial_buf[48];
+uint8_t serial_idx = 0;
+
+int clampi(int v, int lo, int hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
 }
 
-// Interrupt handlers
-void encoderLeftISR() {
-  encoder_left++;
+float wrap_pi(float a) {
+  while (a > 3.14159265f) a -= 6.28318531f;
+  while (a < -3.14159265f) a += 6.28318531f;
+  return a;
 }
 
-void encoderRightISR() {
-  encoder_right++;
+int step_towards(int current, int target, int step) {
+  if (target > current) return current + min(step, target - current);
+  if (target < current) return current - min(step, current - target);
+  return current;
 }
 
-// Motor control
-void move(int pwmA, int pwmB) {
-  digitalWrite(PIN_Motor_AIN_1, pwmA >= 0);
-  digitalWrite(PIN_Motor_BIN_1, pwmB >= 0);
-  analogWrite(PIN_Motor_PWMA, abs(pwmA));
-  analogWrite(PIN_Motor_PWMB, abs(pwmB));
+void set_motor_hw(int pwm_l, int pwm_r) {
+  int hw_l = clampi(LEFT_SIGN * pwm_l, -255, 255);
+  int hw_r = clampi(RIGHT_SIGN * pwm_r, -255, 255);
+
+  digitalWrite(PIN_Motor_AIN_1, hw_l >= 0);
+  digitalWrite(PIN_Motor_BIN_1, hw_r >= 0);
+  analogWrite(PIN_Motor_PWMA, abs(hw_l));
+  analogWrite(PIN_Motor_PWMB, abs(hw_r));
 }
 
-void stopMotors() {
-  analogWrite(PIN_Motor_PWMA, 0);
-  analogWrite(PIN_Motor_PWMB, 0);
+void set_targets(int pwm_l, int pwm_r) {
+  target_pwm_l = clampi(pwm_l, -255, 255);
+  target_pwm_r = clampi(pwm_r, -255, 255);
+  last_cmd_ms = millis();
+}
+
+void stop_motors() {
+  target_pwm_l = 0;
+  target_pwm_r = 0;
+}
+
+void calibrate_gyro_bias(int samples) {
+  long sum = 0;
+  for (int i = 0; i < samples; ++i) {
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    sum += gz;
+    delay(4);
+  }
+  gyro_bias_z = sum / (float)samples;
+}
+
+void update_imu() {
+  unsigned long now = millis();
+  float dt = (now - last_imu_ms) / 1000.0f;
+  if (dt <= 0.0f) {
+    last_imu_ms = now;
+    return;
+  }
+  last_imu_ms = now;
+
+  int16_t ax, ay, az, gx, gy, gz;
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  yaw_rate_dps = (gz - gyro_bias_z) / 131.0f;
+  float wz_rad = yaw_rate_dps * GYRO_DPS_TO_RAD;
+  yaw_rad = wrap_pi(yaw_rad + wz_rad * dt);
+}
+
+long measure_pulse_us() {
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+  return pulseIn(PIN_ECHO, HIGH, ULTRA_TIMEOUT_US);
+}
+
+int read_distance_cm() {
+  long us = measure_pulse_us();
+  if (us == 0) return 999;
+  int cm = (int)(us / 58);
+  if (cm < 1) cm = 1;
+  if (cm > 500) cm = 500;
+  return cm;
+}
+
+void update_sensors() {
+  unsigned long now = millis();
+  if (now - last_dist_ms >= DIST_MS) {
+    last_dist_ms = now;
+    dist_c_cm = read_distance_cm();
+  }
+  ir_l_raw = analogRead(PIN_IR_LEFT);
+  ir_r_raw = analogRead(PIN_IR_RIGHT);
+}
+
+void parse_line(char* line) {
+  if (line[0] == '\0') return;
+
+  if (strncmp(line, "CMD,", 4) == 0) {
+    int l = 0, r = 0;
+    if (sscanf(line, "CMD,%d,%d", &l, &r) == 2) {
+      set_targets(l, r);
+    }
+    return;
+  }
+
+  if (strcmp(line, "STOP") == 0) {
+    stop_motors();
+    return;
+  }
+
+  if (strcmp(line, "GYRO_ZERO") == 0) {
+    stop_motors();
+    set_motor_hw(0, 0);
+    calibrate_gyro_bias(120);
+    yaw_rad = 0.0f;
+    Serial.println(F("ACK,GYRO_ZERO"));
+    return;
+  }
+
+  if (strcmp(line, "PING") == 0) {
+    Serial.println(F("ACK,PONG"));
+    return;
+  }
+}
+
+void poll_serial() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      serial_buf[serial_idx] = '\0';
+      parse_line(serial_buf);
+      serial_idx = 0;
+      continue;
+    }
+
+    if (serial_idx < sizeof(serial_buf) - 1) {
+      serial_buf[serial_idx++] = c;
+    } else {
+      serial_idx = 0;
+    }
+  }
+}
+
+void update_motors() {
+  unsigned long now = millis();
+  if (now - last_cmd_ms > CMD_TIMEOUT_MS) {
+    target_pwm_l = 0;
+    target_pwm_r = 0;
+  }
+
+  current_pwm_l = step_towards(current_pwm_l, target_pwm_l, SLEW_STEP);
+  current_pwm_r = step_towards(current_pwm_r, target_pwm_r, SLEW_STEP);
+  set_motor_hw(current_pwm_l, current_pwm_r);
+}
+
+void send_telemetry() {
+  unsigned long now = millis();
+  if (now - last_telemetry_ms < TELEMETRY_MS) return;
+  last_telemetry_ms = now;
+
+  Serial.print(F("STAT,"));
+  Serial.print(now);
+  Serial.print(F(","));
+  Serial.print(yaw_rad * GYRO_RAD_TO_DEG, 2);
+  Serial.print(F(","));
+  Serial.print(yaw_rate_dps, 2);
+  Serial.print(F(","));
+  Serial.print(current_pwm_l);
+  Serial.print(F(","));
+  Serial.print(current_pwm_r);
+  Serial.print(F(","));
+  Serial.print(dist_c_cm);
+  Serial.print(F(","));
+  Serial.print(ir_l_raw);
+  Serial.print(F(","));
+  Serial.print(ir_r_raw);
+  Serial.println();
 }
 
 void setup() {
-  Serial.begin(9600);
-  Wire.begin();
-  mpu.initialize();
+  Serial.begin(SERIAL_BAUD);
 
-  // Motor pins
   pinMode(PIN_Motor_PWMA, OUTPUT);
   pinMode(PIN_Motor_PWMB, OUTPUT);
   pinMode(PIN_Motor_AIN_1, OUTPUT);
@@ -82,137 +242,29 @@ void setup() {
   pinMode(PIN_Motor_STBY, OUTPUT);
   digitalWrite(PIN_Motor_STBY, HIGH);
 
-  // Encoder pins
-  pinMode(ENCODER_LEFT_PIN, INPUT_PULLUP);
-  pinMode(ENCODER_RIGHT_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_LEFT_PIN), encoderLeftISR, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_RIGHT_PIN), encoderRightISR, RISING);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+  pinMode(PIN_IR_LEFT, INPUT);
+  pinMode(PIN_IR_RIGHT, INPUT);
 
-  randomSeed(analogRead(A0));
+  Wire.begin();
+  mpu.initialize();
+  delay(900);
+  calibrate_gyro_bias(200);
 
-  // Small delay to stabilize MPU
-  delay(1000);
+  last_cmd_ms = millis();
+  last_imu_ms = millis();
+  last_telemetry_ms = millis();
+  last_dist_ms = millis();
 
-  // Calibrate gyro z bias (take average of few samples)
-  const int CAL_SAMPLES = 200;
-  long sum = 0;
-  for (int i = 0; i < CAL_SAMPLES; ++i) {
-    int16_t gx, gy, gz, ax, ay, az;
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    sum += gz;
-    delay(5);
-  }
-  gyro_z_offset = sum / (float)CAL_SAMPLES;
-  Serial.print("Gyro Z offset: ");
-  Serial.println(gyro_z_offset);
-
-  last_odom_time = millis();
-}
-
-void updateIMUandOdometry(float &x, float &y, float &theta_enc, float &theta_fused, float &theta_gyro) {
-  unsigned long now = millis();
-  float dt = (now - last_odom_time) / 1000.0f;
-  if (dt <= 0.0f) return; // safety
-  last_odom_time = now;
-
-  // --- Read MPU6050 ---
-  int16_t ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-  mpu.getMotion6(&ax_raw, &ay_raw, &az_raw, &gx_raw, &gy_raw, &gz_raw);
-
-  // Convert gyro Z to rad/s, subtract offset
-  float gyro_z_dps = (gz_raw - gyro_z_offset) / 131.0f; // deg/s
-  float gyro_z_rad = gyro_z_dps * DEG_TO_RAD;           // rad/s
-
-  // Integrate gyro orientation
-  theta_gyro += gyro_z_rad * dt;
-
-  // --- Read encoders ---
-  static long last_left_ticks = 0;
-  static long last_right_ticks = 0;
-  long left_ticks, right_ticks;
-  safeReadEncoders(left_ticks, right_ticks);
-
-  long delta_left = left_ticks - last_left_ticks;
-  long delta_right = right_ticks - last_right_ticks;
-  last_left_ticks = left_ticks;
-  last_right_ticks = right_ticks;
-
-  // Convert ticks to distance
-  float dist_per_tick = (2.0f * M_PI * WHEEL_RADIUS) / TICKS_PER_REV;
-  float dL = delta_left * dist_per_tick;
-  float dR = delta_right * dist_per_tick;
-
-  float ds = (dR + dL) / 2.0f;
-  float dtheta_enc = (dR - dL) / WHEEL_BASE;
-
-  // Update encoder-based theta
-  theta_enc += dtheta_enc;
-
-  // Complementary filter: fuse gyro integration (fast) with encoder (slow drift correction)
-  float predicted_theta = theta_fused + gyro_z_rad * dt;
-  theta_fused = ALPHA * predicted_theta + (1.0f - ALPHA) * theta_enc;
-
-  // Normalize theta_fused between -pi..pi
-  if (theta_fused > M_PI) theta_fused -= 2.0f * M_PI;
-  if (theta_fused < -M_PI) theta_fused += 2.0f * M_PI;
-
-  // Update position using fused orientation
-  x += ds * cosf(theta_fused);
-  y += ds * sinf(theta_fused);
-
-  // --- Debug output ---
-  Serial.print("EncL:");
-  Serial.print(delta_left);
-  Serial.print(" EncR:");
-  Serial.print(delta_right);
-  Serial.print(" dL:");
-  Serial.print(dL, 4);
-  Serial.print(" dR:");
-  Serial.print(dR, 4);
-  Serial.print(" theta_enc:");
-  Serial.print(theta_enc, 4);
-  Serial.print(" theta_gyro:");
-  Serial.print(theta_gyro, 4);
-  Serial.print(" fused:");
-  Serial.print(theta_fused, 4);
-  Serial.print(" x:");
-  Serial.print(x, 4);
-  Serial.print(" y:");
-  Serial.print(y, 4);
-  Serial.print(" | GyroZ(rad/s):");
-  Serial.print(gyro_z_rad, 4);
-  Serial.print(" Accel:");
-  Serial.print(ax_raw);
-  Serial.print(",");
-  Serial.print(ay_raw);
-  Serial.print(",");
-  Serial.print(az_raw);
-  Serial.println();
+  set_motor_hw(0, 0);
+  Serial.println(F("READY, motors+imu+sensors"));
 }
 
 void loop() {
-  // Random motion test (2s move, 1s stop)
-  int dir = random(0, 4);
-  int speed = random(150, 255);
-
-  switch (dir) {
-    case 0: move(speed, speed);    Serial.println("Command: forward"); break;
-    case 1: move(-speed, -speed);  Serial.println("Command: backward"); break;
-    case 2: move(-speed, speed);   Serial.println("Command: rotate left"); break;
-    case 3: move(speed, -speed);   Serial.println("Command: rotate right"); break;
-  }
-
-  unsigned long move_start = millis();
-  while (millis() - move_start < 2000) {
-    updateIMUandOdometry(x, y, theta_enc, theta_fused, theta_gyro);
-    delay(50); // ~20Hz update
-  }
-
-  stopMotors();
-  Serial.println("Stopped");
-  unsigned long stop_start = millis();
-  while (millis() - stop_start < 1000) {
-    updateIMUandOdometry(x, y, theta_enc, theta_fused, theta_gyro);
-    delay(50);
-  }
+  poll_serial();
+  update_imu();
+  update_sensors();
+  update_motors();
+  send_telemetry();
 }

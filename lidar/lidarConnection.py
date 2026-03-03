@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from lidarLib import Lidar
 import requests
 
-url = ""
+url = "https://ismacarbo.com/lidar"
 
 lidar = Lidar('/dev/ttyUSB0')
 lidar.connect()

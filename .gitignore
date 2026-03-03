@@ -14,3 +14,4 @@ instance/
 .pytest_cache/
 htmlcov/
 .coverage/lidar/__pycache__
+lidar/trajectory.csv
