@@ -174,17 +174,17 @@ Every message is encoded as a binary frame with three conceptual sections:
 
 ### Canonical Frame Layout
 
-| Field | Size | Type | Meaning |
-|---|---:|---|---|
-| `SOF1` | 1 byte | `uint8` | First start-of-frame marker |
-| `SOF2` | 1 byte | `uint8` | Second start-of-frame marker |
-| `VERSION` | 1 byte | `uint8` | Protocol version |
-| `MSG_TYPE` | 1 byte | `uint8` | Message identifier |
-| `FLAGS` | 1 byte | `uint8` | Frame metadata flags |
-| `SEQ` | 1 byte | `uint8` | Sequence number |
-| `LEN` | 2 bytes | `uint16` | Payload length |
-| `PAYLOAD` | `LEN` bytes | byte array | Message content |
-| `CRC16` | 2 bytes | `uint16` | Frame integrity check |
+| Field      |        Size | Type       | Meaning                      |
+| ---------- | ----------: | ---------- | ---------------------------- |
+| `SOF1`     |      1 byte | `uint8`    | First start-of-frame marker  |
+| `SOF2`     |      1 byte | `uint8`    | Second start-of-frame marker |
+| `VERSION`  |      1 byte | `uint8`    | Protocol version             |
+| `MSG_TYPE` |      1 byte | `uint8`    | Message identifier           |
+| `FLAGS`    |      1 byte | `uint8`    | Frame metadata flags         |
+| `SEQ`      |      1 byte | `uint8`    | Sequence number              |
+| `LEN`      |     2 bytes | `uint16`   | Payload length               |
+| `PAYLOAD`  | `LEN` bytes | byte array | Message content              |
+| `CRC16`    |     2 bytes | `uint16`   | Frame integrity check        |
 
 ### Start-of-Frame Markers
 
@@ -212,16 +212,16 @@ Each message type has exactly one associated payload definition.
 
 `FLAGS` carries frame-level metadata.
 
-| Bit | Name | Meaning |
-|---:|---|---|
-| 0 | `ACK_REQ` | Sender requests acknowledgment |
-| 1 | `ACK_FRAME` | This frame is an acknowledgment |
-| 2 | `ERR_FRAME` | This frame reports an error |
-| 3 | `RESERVED` | Reserved |
-| 4 | `RESERVED` | Reserved |
-| 5 | `RESERVED` | Reserved |
-| 6 | `RESERVED` | Reserved |
-| 7 | `RESERVED` | Reserved |
+|  Bit | Name        | Meaning                         |
+| ---: | ----------- | ------------------------------- |
+|    0 | `ACK_REQ`   | Sender requests acknowledgment  |
+|    1 | `ACK_FRAME` | This frame is an acknowledgment |
+|    2 | `ERR_FRAME` | This frame reports an error     |
+|    3 | `RESERVED`  | Reserved                        |
+|    4 | `RESERVED`  | Reserved                        |
+|    5 | `RESERVED`  | Reserved                        |
+|    6 | `RESERVED`  | Reserved                        |
+|    7 | `RESERVED`  | Reserved                        |
 
 Reserved bits must be transmitted as zero in v1.
 
@@ -255,13 +255,13 @@ RSP-v1 uses:
 
 #### CRC Parameters
 
-| Parameter | Value |
-|---|---|
-| Polynomial | `0x1021` |
-| Initial value | `0xFFFF` |
-| Reflected input | `false` |
-| Reflected output | `false` |
-| Final XOR | `0x0000` |
+| Parameter        | Value    |
+| ---------------- | -------- |
+| Polynomial       | `0x1021` |
+| Initial value    | `0xFFFF` |
+| Reflected input  | `false`  |
+| Reflected output | `false`  |
+| Final XOR        | `0x0000` |
 
 #### CRC Coverage
 
@@ -321,32 +321,32 @@ Examples:
 
 ### Service / Protocol-Level Messages
 
-| Name | ID | Direction |
-|---|---:|---|
-| `PING` | `0x01` | Host -> Controller |
-| `ACK` | `0x02` | Bidirectional |
-| `ERROR` | `0x03` | Bidirectional |
+| Name    |     ID | Direction          |
+| ------- | -----: | ------------------ |
+| `PING`  | `0x01` | Host -> Controller |
+| `ACK`   | `0x02` | Bidirectional      |
+| `ERROR` | `0x03` | Bidirectional      |
 
 ### Control Messages
 
-| Name | ID | Direction |
-|---|---:|---|
-| `MOTOR_CMD` | `0x10` | Host -> Controller |
-| `STOP_CMD` | `0x11` | Host -> Controller |
-| `MODE_CMD` | `0x12` | Host -> Controller |
+| Name            |     ID | Direction          |
+| --------------- | -----: | ------------------ |
+| `MOTOR_CMD`     | `0x10` | Host -> Controller |
+| `STOP_CMD`      | `0x11` | Host -> Controller |
+| `MODE_CMD`      | `0x12` | Host -> Controller |
 | `GYRO_ZERO_CMD` | `0x13` | Host -> Controller |
-| `CONFIG_SET` | `0x14` | Host -> Controller |
+| `CONFIG_SET`    | `0x14` | Host -> Controller |
 | `HEARTBEAT_CMD` | `0x15` | Host -> Controller |
 
 ### Telemetry Messages
 
-| Name | ID | Direction |
-|---|---:|---|
-| `IMU_TELEMETRY` | `0x20` | Controller -> Host |
-| `SAFETY_TELEMETRY` | `0x21` | Controller -> Host |
+| Name                |     ID | Direction          |
+| ------------------- | -----: | ------------------ |
+| `IMU_TELEMETRY`     | `0x20` | Controller -> Host |
+| `SAFETY_TELEMETRY`  | `0x21` | Controller -> Host |
 | `ENCODER_TELEMETRY` | `0x22` | Controller -> Host |
-| `MOTOR_STATE` | `0x23` | Controller -> Host |
-| `HEARTBEAT_STATE` | `0x24` | Controller -> Host |
+| `MOTOR_STATE`       | `0x23` | Controller -> Host |
+| `HEARTBEAT_STATE`   | `0x24` | Controller -> Host |
 
 ---
 
@@ -372,7 +372,7 @@ An explicit stop request.
 It has stronger semantic meaning than merely sending a zero motor command.
 
 ### `MODE_CMD` (`0x12`)
-A request to change the controller’s operation mode.
+A request to change the controller's operation mode.
 Examples include idle, manual, autonomous, calibration, and emergency stop latch.
 
 ### `GYRO_ZERO_CMD` (`0x13`)
@@ -507,21 +507,21 @@ Examples include unsupported command, invalid mode, out-of-range values, unavail
 
 ### Standard Error Categories
 
-| Code | Name | Meaning |
-|---:|---|---|
-| `0x01` | `UNKNOWN_MSG_TYPE` | Message type not recognized |
-| `0x02` | `INVALID_LENGTH` | Payload length inconsistent with type |
-| `0x03` | `CRC_MISMATCH` | Integrity check failed |
-| `0x04` | `INVALID_VALUE` | Field value outside accepted domain |
-| `0x05` | `IMU_NOT_READY` | IMU unavailable or uninitialized |
-| `0x06` | `CALIBRATION_BUSY` | Requested action blocked by calibration |
-| `0x07` | `MOTORS_DISABLED` | Motion command rejected because motors unavailable |
-| `0x08` | `ENCODERS_UNAVAILABLE` | Encoder-related state unavailable |
-| `0x09` | `SENSOR_TIMEOUT` | Sensor acquisition timed out |
-| `0x0A` | `UNSUPPORTED_MODE` | Requested mode invalid or unsupported |
-| `0x0B` | `INTERNAL_FAULT` | Internal controller fault |
-| `0x0C` | `BUSY` | Resource or subsystem temporarily busy |
-| `0x0D` | `NOT_IMPLEMENTED` | Recognized but not implemented in current firmware |
+|   Code | Name                   | Meaning                                            |
+| -----: | ---------------------- | -------------------------------------------------- |
+| `0x01` | `UNKNOWN_MSG_TYPE`     | Message type not recognized                        |
+| `0x02` | `INVALID_LENGTH`       | Payload length inconsistent with type              |
+| `0x03` | `CRC_MISMATCH`         | Integrity check failed                             |
+| `0x04` | `INVALID_VALUE`        | Field value outside accepted domain                |
+| `0x05` | `IMU_NOT_READY`        | IMU unavailable or uninitialized                   |
+| `0x06` | `CALIBRATION_BUSY`     | Requested action blocked by calibration            |
+| `0x07` | `MOTORS_DISABLED`      | Motion command rejected because motors unavailable |
+| `0x08` | `ENCODERS_UNAVAILABLE` | Encoder-related state unavailable                  |
+| `0x09` | `SENSOR_TIMEOUT`       | Sensor acquisition timed out                       |
+| `0x0A` | `UNSUPPORTED_MODE`     | Requested mode invalid or unsupported              |
+| `0x0B` | `INTERNAL_FAULT`       | Internal controller fault                          |
+| `0x0C` | `BUSY`                 | Resource or subsystem temporarily busy             |
+| `0x0D` | `NOT_IMPLEMENTED`      | Recognized but not implemented in current firmware |
 
 ---
 
@@ -600,7 +600,7 @@ Its essential properties are:
 
 The key architectural takeaway is:
 
-> RSP-v1 is the protocol between embedded control and host supervision.  
+> RSP-v1 is the protocol between embedded control and host supervision.
 > It is not the host middleware itself.
 
 ---
@@ -609,58 +609,58 @@ The key architectural takeaway is:
 
 ### Frame Header
 
-| Field | Size |
-|---|---:|
-| `SOF1` | 1 |
-| `SOF2` | 1 |
-| `VERSION` | 1 |
-| `MSG_TYPE` | 1 |
-| `FLAGS` | 1 |
-| `SEQ` | 1 |
-| `LEN` | 2 |
+| Field      | Size |
+| ---------- | ---: |
+| `SOF1`     |    1 |
+| `SOF2`     |    1 |
+| `VERSION`  |    1 |
+| `MSG_TYPE` |    1 |
+| `FLAGS`    |    1 |
+| `SEQ`      |    1 |
+| `LEN`      |    2 |
 
 ### Frame Footer
 
-| Field | Size |
-|---|---:|
-| `CRC16` | 2 |
+| Field   | Size |
+| ------- | ---: |
+| `CRC16` |    2 |
 
 ### Start Bytes
 
-| Field | Value |
-|---|---|
+| Field  | Value  |
+| ------ | ------ |
 | `SOF1` | `0xAA` |
 | `SOF2` | `0x55` |
 
 ### Protocol Version
 
-| Field | Value |
-|---|---|
+| Field     | Value  |
+| --------- | ------ |
 | `VERSION` | `0x01` |
 
 ### CRC Algorithm
 
-| Field | Value |
-|---|---|
-| Algorithm | `CRC-16/CCITT-FALSE` |
-| Polynomial | `0x1021` |
-| Init | `0xFFFF` |
+| Field      | Value                |
+| ---------- | -------------------- |
+| Algorithm  | `CRC-16/CCITT-FALSE` |
+| Polynomial | `0x1021`             |
+| Init       | `0xFFFF`             |
 
 ### Core Message IDs
 
-| ID | Name |
-|---:|---|
-| `0x01` | `PING` |
-| `0x02` | `ACK` |
-| `0x03` | `ERROR` |
-| `0x10` | `MOTOR_CMD` |
-| `0x11` | `STOP_CMD` |
-| `0x12` | `MODE_CMD` |
-| `0x13` | `GYRO_ZERO_CMD` |
-| `0x14` | `CONFIG_SET` |
-| `0x15` | `HEARTBEAT_CMD` |
-| `0x20` | `IMU_TELEMETRY` |
-| `0x21` | `SAFETY_TELEMETRY` |
+|     ID | Name                |
+| -----: | ------------------- |
+| `0x01` | `PING`              |
+| `0x02` | `ACK`               |
+| `0x03` | `ERROR`             |
+| `0x10` | `MOTOR_CMD`         |
+| `0x11` | `STOP_CMD`          |
+| `0x12` | `MODE_CMD`          |
+| `0x13` | `GYRO_ZERO_CMD`     |
+| `0x14` | `CONFIG_SET`        |
+| `0x15` | `HEARTBEAT_CMD`     |
+| `0x20` | `IMU_TELEMETRY`     |
+| `0x21` | `SAFETY_TELEMETRY`  |
 | `0x22` | `ENCODER_TELEMETRY` |
-| `0x23` | `MOTOR_STATE` |
-| `0x24` | `HEARTBEAT_STATE` |
+| `0x23` | `MOTOR_STATE`       |
+| `0x24` | `HEARTBEAT_STATE`   |
