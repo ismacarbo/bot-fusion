@@ -1,4 +1,5 @@
 import argparse
+import csv
 import math
 import time
 from typing import Tuple
@@ -107,6 +108,113 @@ def sector_min_range(points: np.ndarray, amin: float, amax: float, default: floa
     if not np.any(mask):
         return default
     return float(np.min(rng[mask]))
+
+
+class PoseEKF2D:
+    def __init__(
+        self,
+        init_pose=(0.0, 0.0, 0.0),
+        init_xy_std=0.25,
+        init_theta_std=math.radians(20.0),
+        sigma_v=0.20,
+        sigma_w=math.radians(18.0),
+    ):
+        self.x = np.asarray(init_pose, dtype=float).reshape(3)
+        self.P = np.diag(
+            [
+                float(init_xy_std) ** 2,
+                float(init_xy_std) ** 2,
+                float(init_theta_std) ** 2,
+            ]
+        )
+        self.sigma_v = float(max(1e-4, sigma_v))
+        self.sigma_w = float(max(1e-4, sigma_w))
+
+    @staticmethod
+    def _symmetrize(mat):
+        return 0.5 * (mat + mat.T)
+
+    def predict(self, dt, v, w):
+        dt = float(max(0.0, dt))
+        if dt <= 0.0:
+            return
+
+        v = float(v)
+        w = float(w)
+
+        th = float(self.x[2])
+        dth = w * dt
+        th_mid = th + 0.5 * dth
+
+        dx = v * dt * math.cos(th_mid)
+        dy = v * dt * math.sin(th_mid)
+
+        self.x[0] += dx
+        self.x[1] += dy
+        self.x[2] = wrap_angle(th + dth)
+
+        F = np.eye(3, dtype=float)
+        F[0, 2] = -v * dt * math.sin(th_mid)
+        F[1, 2] = v * dt * math.cos(th_mid)
+
+        G = np.array(
+            [
+                [dt * math.cos(th_mid), -0.5 * v * dt * dt * math.sin(th_mid)],
+                [dt * math.sin(th_mid), 0.5 * v * dt * dt * math.cos(th_mid)],
+                [0.0, dt],
+            ],
+            dtype=float,
+        )
+        M = np.diag([self.sigma_v ** 2, self.sigma_w ** 2])
+        Q = G @ M @ G.T
+        Q += np.diag([1e-7, 1e-7, 1e-8])
+
+        self.P = F @ self.P @ F.T + Q
+        self.P = self._symmetrize(self.P)
+
+    def update_pose(self, z_pose, sigma_xy, sigma_theta):
+        z = np.asarray(z_pose, dtype=float).reshape(3)
+        H = np.eye(3, dtype=float)
+        R = np.diag(
+            [
+                float(max(1e-4, sigma_xy)) ** 2,
+                float(max(1e-4, sigma_xy)) ** 2,
+                float(max(1e-4, sigma_theta)) ** 2,
+            ]
+        )
+
+        y = z - self.x
+        y[2] = wrap_angle(y[2])
+
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        self.x = self.x + K @ y
+        self.x[2] = wrap_angle(float(self.x[2]))
+
+        I = np.eye(3, dtype=float)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
+        self.P = self._symmetrize(self.P)
+
+    def update_heading(self, theta_meas, sigma_theta):
+        H = np.array([[0.0, 0.0, 1.0]], dtype=float)
+        R = np.array([[float(max(1e-4, sigma_theta)) ** 2]], dtype=float)
+
+        y = wrap_angle(float(theta_meas) - float(self.x[2]))
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        self.x = self.x + (K[:, 0] * y)
+        self.x[2] = wrap_angle(float(self.x[2]))
+
+        I = np.eye(3, dtype=float)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
+        self.P = self._symmetrize(self.P)
+
+    def pose_tuple(self):
+        return (float(self.x[0]), float(self.x[1]), float(self.x[2]))
 
 
 class ArduinoBridge:
@@ -297,14 +405,26 @@ class RobotController:
         self.trajectory = [self.pose]
         self.traj_x = [0.0]
         self.traj_y = [0.0]
+        self.ekf = PoseEKF2D(
+            init_pose=self.pose,
+            init_xy_std=args.ekf_init_xy,
+            init_theta_std=math.radians(args.ekf_init_theta_deg),
+            sigma_v=args.ekf_sigma_v,
+            sigma_w=math.radians(args.ekf_sigma_w_deg),
+        )
 
         self.yaw0 = None
         self.prev_theta = None
         self.prev_local_pts = None
+        self.prev_pose_for_icp = self.pose
         self.last_scan_ts = None
         self.last_cmd = (0, 0)
         self.last_rmse = 0.0
         self.last_pairs = 0
+        self.last_icp_used = False
+        self.last_pred_v = 0.0
+        self.last_pred_w = 0.0
+        self.ekf_rows = []
 
     def _on_post_scan(self, raw_scan, local_pts, telem, cmd, front, left, right, scan_idx):
         # Extension hook for derived controllers (e.g. HTTP streaming).
@@ -379,13 +499,27 @@ class RobotController:
         y = y + v * dt * math.sin(th)
         self.pose = (x, y, th)
 
-    def _update_pose_fused(self, local_pts: np.ndarray, theta_now: float, dt_scan: float):
-        x, y, _ = self.pose
-        self.pose = (x, y, theta_now)
+    def _update_pose_fused(self, local_pts: np.ndarray, theta_now: float, dt_scan: float, telem):
+        pwm_l = int(telem.get("pwmL", self.last_cmd[0]))
+        pwm_r = int(telem.get("pwmR", self.last_cmd[1]))
+        v_l = pwm_to_speed(pwm_l, self.args.kv, self.args.deadzone)
+        v_r = pwm_to_speed(pwm_r, self.args.kv, self.args.deadzone)
+        v = 0.5 * (v_l + v_r)
+        w = math.radians(float(telem.get("yaw_rate_dps", 0.0)))
+
+        self.last_pred_v = float(v)
+        self.last_pred_w = float(w)
+        self.ekf.predict(dt_scan, v=v, w=w)
 
         if self.prev_local_pts is None or self.prev_theta is None:
+            self.ekf.update_heading(theta_now, sigma_theta=math.radians(self.args.ekf_sigma_theta_deg))
+            self.pose = self.ekf.pose_tuple()
             self.prev_local_pts = local_pts
             self.prev_theta = theta_now
+            self.prev_pose_for_icp = self.pose
+            self.last_icp_used = False
+            self.last_pairs = 0
+            self.last_rmse = float("inf")
             return
 
         dtheta = wrap_angle(theta_now - self.prev_theta)
@@ -402,22 +536,59 @@ class RobotController:
         if trans_prev is not None:
             step = float(np.linalg.norm(trans_prev))
             if rmse <= self.args.icp_max_rmse and step <= self.args.max_step_translation:
-                c, s = math.cos(self.prev_theta), math.sin(self.prev_theta)
+                px, py, pth = self.prev_pose_for_icp
+                c, s = math.cos(pth), math.sin(pth)
                 dx = c * trans_prev[0] - s * trans_prev[1]
                 dy = s * trans_prev[0] + c * trans_prev[1]
-                x, y, _ = self.pose
-                self.pose = (x + float(dx), y + float(dy), theta_now)
+                z_pose = np.array([px + float(dx), py + float(dy), theta_now], dtype=float)
+                sigma_xy = max(self.args.ekf_sigma_xy, min(0.6, 1.5 * rmse))
+                self.ekf.update_pose(
+                    z_pose,
+                    sigma_xy=sigma_xy,
+                    sigma_theta=math.radians(self.args.ekf_sigma_theta_deg),
+                )
                 used_icp = True
-                self.last_rmse = rmse
-                self.last_pairs = pairs
 
         if not used_icp:
-            self._fallback_motion(dt_scan)
-            self.last_pairs = pairs
-            self.last_rmse = rmse if trans_prev is not None else float("inf")
+            self.ekf.update_heading(theta_now, sigma_theta=math.radians(self.args.ekf_sigma_theta_deg))
 
+        self.pose = self.ekf.pose_tuple()
         self.prev_local_pts = local_pts
         self.prev_theta = theta_now
+        self.prev_pose_for_icp = self.pose
+        self.last_icp_used = used_icp
+        self.last_pairs = pairs
+        self.last_rmse = rmse if trans_prev is not None else float("inf")
+
+    def _append_ekf_row(self, scan_idx, telem, cmd, front, left, right):
+        P = self.ekf.P
+        self.ekf_rows.append(
+            [
+                int(scan_idx),
+                int(telem.get("ms", 0)),
+                float(self.pose[0]),
+                float(self.pose[1]),
+                float(self.pose[2]),
+                float(P[0, 0]),
+                float(P[0, 1]),
+                float(P[0, 2]),
+                float(P[1, 1]),
+                float(P[1, 2]),
+                float(P[2, 2]),
+                int(1 if self.last_icp_used else 0),
+                float(self.last_rmse),
+                int(self.last_pairs),
+                float(self.last_pred_v),
+                float(self.last_pred_w),
+                int(cmd[0]),
+                int(cmd[1]),
+                float(front),
+                float(left),
+                float(right),
+                float(telem.get("yaw_deg", 0.0)),
+                float(telem.get("yaw_rate_dps", 0.0)),
+            ]
+        )
 
     def _save_outputs(self):
         self.grid.clampLogOdds()
@@ -446,6 +617,36 @@ class RobotController:
 
         header = "x_m,y_m,theta_rad"
         np.savetxt(self.args.traj_out, traj, delimiter=",", header=header, comments="")
+        with open(self.args.ekf_out, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "scan_id",
+                    "telem_ms",
+                    "x_m",
+                    "y_m",
+                    "theta_rad",
+                    "P00",
+                    "P01",
+                    "P02",
+                    "P11",
+                    "P12",
+                    "P22",
+                    "icp_used",
+                    "icp_rmse_m",
+                    "icp_pairs",
+                    "pred_v_mps",
+                    "pred_w_rps",
+                    "cmd_pwm_l",
+                    "cmd_pwm_r",
+                    "front_m",
+                    "left_m",
+                    "right_m",
+                    "yaw_deg",
+                    "yaw_rate_dps",
+                ]
+            )
+            writer.writerows(self.ekf_rows)
 
     def run(self):
         scan_idx = 0
@@ -485,7 +686,7 @@ class RobotController:
                     dt_scan = max(0.0, now - self.last_scan_ts)
                 self.last_scan_ts = now
 
-                self._update_pose_fused(local_pts, theta, dt_scan)
+                self._update_pose_fused(local_pts, theta, dt_scan, telem)
                 self.grid.inverse_sensor_update(self.pose, scan_for_grid)
                 if self.args.clamp_every > 0 and (scan_idx % self.args.clamp_every == 0):
                     self.grid.clampLogOdds()
@@ -498,6 +699,7 @@ class RobotController:
                 self.traj_x.append(self.pose[0])
                 self.traj_y.append(self.pose[1])
                 scan_idx += 1
+                self._append_ekf_row(scan_idx, telem, cmd, front, left, right)
                 self._on_post_scan(raw_scan, local_pts, telem, cmd, front, left, right, scan_idx)
 
                 if self.viewer is not None and (scan_idx % max(1, self.args.gui_every) == 0):
@@ -506,7 +708,7 @@ class RobotController:
                         f"x={self.pose[0]: .2f} y={self.pose[1]: .2f}",
                         f"yaw={math.degrees(self.pose[2]): .1f} deg  gyro={telem['yaw_rate_dps']: .1f} dps",
                         f"front={front:.2f}m left={left:.2f}m right={right:.2f}m",
-                        f"cmd=({cmd[0]:d},{cmd[1]:d})  icp_rmse={self.last_rmse:.3f}  pairs={self.last_pairs}",
+                        f"cmd=({cmd[0]:d},{cmd[1]:d})  icp={int(self.last_icp_used)} rmse={self.last_rmse:.3f} pairs={self.last_pairs}",
                     ]
                     self.viewer.update(
                         prob_map=self.grid.getProbabilityMap(),
@@ -559,6 +761,7 @@ class RobotController:
             self._save_outputs()
             print(f"[INFO] map saved to: {self.args.map_out}")
             print(f"[INFO] trajectory saved to: {self.args.traj_out}")
+            print(f"[INFO] ekf log saved to: {self.args.ekf_out}")
 
             if self.viewer is not None and self.viewer.is_open():
                 plt.ioff()
@@ -595,6 +798,12 @@ def build_parser():
     parser.add_argument("--max-step-translation", type=float, default=0.40, help="Max accepted step [m]")
     parser.add_argument("--kv", type=float, default=0.0034, help="Fallback speed model gain [m/s per PWM]")
     parser.add_argument("--deadzone", type=int, default=20, help="Fallback speed model deadzone PWM")
+    parser.add_argument("--ekf-init-xy", type=float, default=0.25, help="Initial EKF XY std [m]")
+    parser.add_argument("--ekf-init-theta-deg", type=float, default=20.0, help="Initial EKF theta std [deg]")
+    parser.add_argument("--ekf-sigma-v", type=float, default=0.20, help="EKF process std on linear speed [m/s]")
+    parser.add_argument("--ekf-sigma-w-deg", type=float, default=18.0, help="EKF process std on yaw rate [deg/s]")
+    parser.add_argument("--ekf-sigma-xy", type=float, default=0.06, help="Minimum EKF ICP position std [m]")
+    parser.add_argument("--ekf-sigma-theta-deg", type=float, default=4.0, help="EKF heading measurement std [deg]")
 
     parser.add_argument("--cruise-pwm", type=int, default=95, help="Cruise PWM")
     parser.add_argument("--slow-pwm", type=int, default=70, help="Slow PWM near obstacles")
@@ -611,6 +820,7 @@ def build_parser():
     parser.add_argument("--max-scans", type=int, default=0, help="Stop after N scans (0=infinite)")
     parser.add_argument("--map-out", default="robot_map.png", help="Output map image")
     parser.add_argument("--traj-out", default="robot_trajectory.csv", help="Output trajectory CSV")
+    parser.add_argument("--ekf-out", default="robot_ekf_log.csv", help="Output EKF log CSV")
     return parser
 
 
